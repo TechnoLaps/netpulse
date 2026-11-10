@@ -1,42 +1,29 @@
 apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
-apply plugin: 'maven-publish'
 
 group = 'expo.modules.vpninterceptor'
 version = '1.0.0'
 
+// Wire up the Expo Modules API (puts expo.modules.kotlin.* on the classpath,
+// configures Kotlin, and provides useCoreDependencies / SDK version helpers).
 def expoModulesCorePlugin = new File(
   project(":expo-modules-core").projectDir.absolutePath,
   "ExpoModulesCorePlugin.gradle"
 )
-if (expoModulesCorePlugin.exists()) {
-  apply from: expoModulesCorePlugin
-  applyKotlinExpoModulesCorePlugin()
-}
+apply from: expoModulesCorePlugin
+applyKotlinExpoModulesCorePlugin()
+useCoreDependencies()
+useDefaultAndroidSdkVersions()
 
 android {
   namespace "expo.modules.vpninterceptor"
-  compileSdkVersion safeExtGet("compileSdkVersion", 35)
 
   defaultConfig {
-    minSdkVersion safeExtGet("minSdkVersion", 24)
-    targetSdkVersion safeExtGet("targetSdkVersion", 35)
-  }
-
-  compileOptions {
-    sourceCompatibility JavaVersion.VERSION_17
-    targetCompatibility JavaVersion.VERSION_17
-  }
-
-  kotlinOptions {
-    jvmTarget = "17"
+    minSdkVersion 24
   }
 }
 
 dependencies {
+  implementation project(':expo-modules-core')
   implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1"
-}
-
-def safeExtGet(prop, fallback) {
-  rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
 }
