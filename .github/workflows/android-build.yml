@@ -49,7 +49,7 @@ jobs:
       # real device; this also cuts build time roughly 4x. (Last value wins in a
       # Java .properties file, so appending overrides prebuild's default.)
       - name: Limit native build to arm64-v8a
-        run: echo "reactNativeArchitectures=arm64-v8a" >> android/gradle.properties
+        run: printf '\nreactNativeArchitectures=arm64-v8a\n' >> android/gradle.properties
 
       - name: Build debug APK
         working-directory: android
