@@ -24,6 +24,7 @@ import {
   useTrafficStore,
 } from '../../store/useTrafficStore';
 import { MethodBadge, Pill, StatusBadge } from '../../components/Badges';
+import { useCapture } from '../../hooks/useCapture';
 import { formatBytes, formatDuration, formatTime } from '../../utils/format';
 import { hasAuthToken } from '../../utils/tokenExtractor';
 import type { FilterMethod, FilterStatus, TrafficEntry } from '../../utils/types';
@@ -37,10 +38,9 @@ export default function LiveFeedScreen() {
 
   const entries = useTrafficStore((s) => s.entries);
   const filters = useTrafficStore((s) => s.filters);
-  const capturing = useTrafficStore((s) => s.capturing);
   const mockMode = useTrafficStore((s) => s.mockMode);
 
-  const toggleCapture = useTrafficStore((s) => s.toggleCapture);
+  const { capturing, toggle: toggleCapture } = useCapture();
   const emitMockNow = useTrafficStore((s) => s.emitMockNow);
   const clear = useTrafficStore((s) => s.clear);
   const setSearch = useTrafficStore((s) => s.setSearch);

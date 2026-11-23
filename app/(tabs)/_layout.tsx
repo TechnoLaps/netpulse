@@ -1,6 +1,6 @@
 import React from 'react';
 import { Tabs } from 'expo-router';
-import { Activity, LayoutGrid, Share2 } from 'lucide-react-native';
+import { Activity, LayoutGrid, Share2, ShieldCheck } from 'lucide-react-native';
 import { colors } from '../../theme/colors';
 
 export default function TabsLayout() {
@@ -42,6 +42,14 @@ export default function TabsLayout() {
           title: 'Export',
           headerTitle: 'Export & Share',
           tabBarIcon: ({ color, size }) => <Share2 color={color} size={size} />,
+        }}
+      />
+      <Tabs.Screen
+        name="cert"
+        options={{
+          title: 'Cert',
+          headerTitle: 'HTTPS Certificate',
+          tabBarIcon: ({ color, size }) => <ShieldCheck color={color} size={size} />,
         }}
       />
     </Tabs>

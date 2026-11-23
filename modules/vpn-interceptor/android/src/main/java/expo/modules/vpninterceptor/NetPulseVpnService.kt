@@ -5,37 +5,30 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.ProxyInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
+import java.net.Socket
 
 /**
  * NetPulseVpnService
  *
- * A local-only VpnService. It establishes a tun interface that captures IP
- * packets from the selected apps, then hands them to a userspace network stack
- * + local MITM proxy which reconstructs HTTP(S) transactions. Each completed
- * transaction is emitted to JS via the module's event emitter.
+ * A local-only VpnService used purely to (1) scope capture to the selected apps
+ * via addAllowedApplication and (2) point those apps' system HTTP proxy at the
+ * in-process [MitmProxyServer] on 127.0.0.1 (API 29+ setHttpProxy).
  *
- * This file is intentionally a working skeleton:
- *   - The VpnService lifecycle, per-app routing (addAllowedApplication), the tun
- *     fd and the foreground notification are fully wired.
- *   - The packet pump loop is stubbed with clear TODOs where a tun2socks bridge
- *     (e.g. hev-socks5-tunnel / badvpn) plus a local MITM proxy (e.g. an embedded
- *     mitmproxy/Little Proxy with a user-installed CA) are integrated.
+ * The proxy terminates HTTP and (with the user-installed root CA) HTTPS, parses
+ * each transaction and emits it to JS. Upstream sockets are protect()ed so they
+ * bypass the tunnel. We deliberately route only a tiny unused subnet so that
+ * non-proxied traffic (UDP, proxy-ignoring apps) keeps flowing normally and the
+ * device's connectivity is never black-holed.
  *
- * IMPORTANT: Decrypting HTTPS from third-party apps requires the user to install
- * and trust NetPulse's CA certificate, and apps that use certificate pinning
- * will refuse the MITM cert. This tool is intended for inspecting the user's own
- * device traffic for development and authorized security testing only.
+ * Limitations (surfaced in the UI): only apps that honor the system proxy are
+ * captured; certificate-pinned connections will fail the MITM; HTTP/2 is
+ * downgraded to HTTP/1.1. Transparent capture of pinned/proxy-ignoring apps
+ * requires a userspace TCP/IP stack (tun2socks), which is out of scope here.
  */
 class NetPulseVpnService : VpnService() {
 
@@ -44,17 +37,16 @@ class NetPulseVpnService : VpnService() {
     const val ACTION_START = "expo.modules.vpninterceptor.START"
     const val ACTION_STOP = "expo.modules.vpninterceptor.STOP"
     const val EXTRA_ALLOWED_PACKAGES = "allowedPackages"
+    const val EXTRA_ALLOWED_LABELS = "allowedLabels"
 
     private const val NOTIF_CHANNEL = "netpulse_vpn"
-    private const val NOTIF_ID = 0x4E50 // "NP"
+    private const val NOTIF_ID = 0x4E50
 
-    // Virtual addresses for the tun interface (RFC 5737 / private range).
     private const val TUN_ADDRESS = "10.1.10.1"
-    private const val TUN_PREFIX = 32
-    private const val TUN_ROUTE = "0.0.0.0"
+    private const val TUN_ROUTE = "10.1.10.0" // unused subnet; keeps connectivity intact
+    private const val TUN_PREFIX = 24
     private const val TUN_MTU = 1500
 
-    // The module registers a lambda here so the service can push events to JS.
     @Volatile
     private var emitter: ((String, Map<String, Any?>) -> Unit)? = null
 
@@ -68,8 +60,10 @@ class NetPulseVpnService : VpnService() {
   }
 
   private var tunInterface: ParcelFileDescriptor? = null
-  private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-  private var captureJob: Job? = null
+  private var proxy: MitmProxyServer? = null
+  private var ca: CertificateAuthority? = null
+  private var allowedPackages: List<String> = emptyList()
+  private var allowedLabels: List<String> = emptyList()
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     when (intent?.action) {
@@ -78,28 +72,71 @@ class NetPulseVpnService : VpnService() {
         return START_NOT_STICKY
       }
       ACTION_START -> {
-        val allowed = intent.getStringArrayListExtra(EXTRA_ALLOWED_PACKAGES) ?: arrayListOf()
+        allowedPackages = intent.getStringArrayListExtra(EXTRA_ALLOWED_PACKAGES) ?: arrayListOf()
+        allowedLabels = intent.getStringArrayListExtra(EXTRA_ALLOWED_LABELS) ?: arrayListOf()
         startForegroundNotice()
-        startCapture(allowed)
+        startCapture()
       }
     }
     return START_STICKY
   }
 
-  private fun startCapture(allowedPackages: List<String>) {
+  private fun startCapture() {
     emit(VpnInterceptorModule.EVENT_STATUS, mapOf("state" to "preparing"))
+    try {
+      val authority = CertificateAuthority(applicationContext)
+      ca = authority
 
-    val builder = Builder()
-      .setSession("NetPulse Inspector")
-      .setMtu(TUN_MTU)
-      .addAddress(TUN_ADDRESS, TUN_PREFIX)
-      .addRoute(TUN_ROUTE, 0)
-      // Keep DNS working through the tunnel.
-      .addDnsServer("1.1.1.1")
+      val server = MitmProxyServer(
+        ca = authority,
+        protect = { socket: Socket -> this.protect(socket) },
+        attribution = { attribution() },
+        onTransaction = { entry ->
+          emit(VpnInterceptorModule.EVENT_TRANSACTION, mapOf("payload" to entry))
+        },
+      )
+      val port = server.start()
+      proxy = server
 
-    // -- Per-app filtering: only route the selected packages ------------------
-    // addAllowedApplication() restricts the VPN to ONLY these apps. If none are
-    // specified we fall back to capturing all apps except ourselves.
+      val builder = Builder()
+        .setSession("NetPulse Inspector")
+        .setMtu(TUN_MTU)
+        .addAddress(TUN_ADDRESS, TUN_PREFIX)
+        .addRoute(TUN_ROUTE, TUN_PREFIX)
+
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        builder.setHttpProxy(ProxyInfo.buildDirectProxy("127.0.0.1", port))
+      } else {
+        emit(
+          VpnInterceptorModule.EVENT_STATUS,
+          mapOf("state" to "error", "message" to "Requires Android 10+ (system HTTP proxy)")
+        )
+      }
+
+      applyAppFilter(builder)
+
+      val tun = builder.establish()
+      if (tun == null) {
+        emit(
+          VpnInterceptorModule.EVENT_STATUS,
+          mapOf("state" to "error", "message" to "establish() returned null (consent missing?)")
+        )
+        stopSelf()
+        return
+      }
+      tunInterface = tun
+      emit(VpnInterceptorModule.EVENT_STATUS, mapOf("state" to "running", "proxyPort" to port))
+    } catch (e: Exception) {
+      Log.e(TAG, "startCapture failed", e)
+      emit(
+        VpnInterceptorModule.EVENT_STATUS,
+        mapOf("state" to "error", "message" to (e.message ?: "unknown error"))
+      )
+      stopCapture()
+    }
+  }
+
+  private fun applyAppFilter(builder: Builder) {
     if (allowedPackages.isNotEmpty()) {
       for (pkg in allowedPackages) {
         try {
@@ -108,129 +145,30 @@ class NetPulseVpnService : VpnService() {
           Log.w(TAG, "Package not installed, skipping: $pkg")
         }
       }
-    } else {
-      // Never capture our own traffic (avoid loops).
-      try {
-        builder.addDisallowedApplication(packageName)
-      } catch (e: PackageManager.NameNotFoundException) {
-        Log.w(TAG, "Could not exclude self", e)
-      }
     }
-
-    val tun = builder.establish()
-    if (tun == null) {
-      emit(
-        VpnInterceptorModule.EVENT_STATUS,
-        mapOf("state" to "error", "message" to "establish() returned null (consent missing?)")
-      )
-      stopSelf()
-      return
-    }
-    tunInterface = tun
-    emit(VpnInterceptorModule.EVENT_STATUS, mapOf("state" to "running"))
-
-    captureJob = scope.launch {
-      runPacketPump(tun)
-    }
-  }
-
-  /**
-   * The packet pump. Reads IP packets from the tun fd and feeds them to the
-   * userspace stack + local proxy.
-   *
-   * TODO (real interception):
-   *   1. Start a local SOCKS/HTTP proxy bound to 127.0.0.1:<port>.
-   *   2. Bridge the tun fd to that proxy with a tun2socks implementation
-   *      (hev-socks5-tunnel via JNI, or badvpn-tun2socks). protect() the proxy's
-   *      upstream sockets so they bypass the VPN and reach the network.
-   *   3. In the proxy, terminate TLS using a locally-generated CA that the user
-   *      has installed + trusted, parse the HTTP request/response, then forward.
-   *   4. For each completed transaction, build the TrafficEntry map below and
-   *      call emitTransaction(entry).
-   */
-  private suspend fun runPacketPump(tun: ParcelFileDescriptor) {
-    val input = java.io.FileInputStream(tun.fileDescriptor)
-    val packet = ByteArray(TUN_MTU)
+    // Never route our own app through the tunnel (avoid loops).
     try {
-      while (scope.isActive) {
-        val length = input.read(packet)
-        if (length > 0) {
-          // TODO: hand `packet[0 until length]` to tun2socks.
-          // The demo build does not forward packets; it relies on the JS-side
-          // Simulation Mode to populate the UI. See class doc.
-        }
-      }
-    } catch (e: Exception) {
-      Log.e(TAG, "Packet pump stopped", e)
-    } finally {
-      input.close()
+      builder.addDisallowedApplication(packageName)
+    } catch (e: PackageManager.NameNotFoundException) {
+      Log.w(TAG, "Could not exclude self", e)
     }
   }
 
-  /**
-   * Helper the proxy layer calls once it has reconstructed a full HTTP
-   * transaction. Shapes the payload to match the JS `TrafficEntry` type.
-   */
-  @Suppress("unused")
-  fun emitTransaction(
-    id: String,
-    startedAt: Long,
-    durationMs: Long,
-    sourceApp: String,
-    sourceAppLabel: String,
-    scheme: String,
-    host: String,
-    path: String,
-    method: String,
-    url: String,
-    requestHeaders: List<Pair<String, String>>,
-    requestBody: String,
-    responseStatus: Int,
-    responseStatusText: String,
-    responseHeaders: List<Pair<String, String>>,
-    responseBody: String,
-    tlsDecrypted: Boolean
-  ) {
-    fun headers(list: List<Pair<String, String>>) =
-      list.map { mapOf("name" to it.first, "value" to it.second) }
-
-    fun body(text: String, mime: String) = mapOf(
-      "kind" to if (mime.contains("json")) "json" else "text",
-      "text" to text,
-      "mimeType" to mime,
-      "sizeBytes" to text.toByteArray().size
-    )
-
-    val entry = mapOf(
-      "id" to id,
-      "startedAt" to startedAt,
-      "durationMs" to durationMs,
-      "sourceApp" to sourceApp,
-      "sourceAppLabel" to sourceAppLabel,
-      "host" to host,
-      "path" to path,
-      "scheme" to scheme,
-      "tlsDecrypted" to tlsDecrypted,
-      "request" to mapOf(
-        "method" to method,
-        "url" to url,
-        "headers" to headers(requestHeaders),
-        "queryParams" to emptyList<Any>(),
-        "body" to body(requestBody, "application/json")
-      ),
-      "response" to mapOf(
-        "statusCode" to responseStatus,
-        "statusText" to responseStatusText,
-        "headers" to headers(responseHeaders),
-        "body" to body(responseBody, "application/json")
-      )
-    )
-    emit(VpnInterceptorModule.EVENT_TRANSACTION, mapOf("payload" to entry))
+  /** Attribute captured traffic to the single selected app, or a generic label. */
+  private fun attribution(): Pair<String, String> {
+    return if (allowedPackages.size == 1) {
+      allowedPackages[0] to (allowedLabels.firstOrNull() ?: allowedPackages[0])
+    } else {
+      "multiple" to "Selected apps"
+    }
   }
 
   private fun stopCapture() {
-    captureJob?.cancel()
-    captureJob = null
+    try {
+      proxy?.stop()
+    } catch (_: Exception) {
+    }
+    proxy = null
     try {
       tunInterface?.close()
     } catch (_: Exception) {
@@ -260,14 +198,16 @@ class NetPulseVpnService : VpnService() {
     startForeground(NOTIF_ID, notification)
   }
 
-  override fun onDestroy() {
-    scope.cancel()
-    super.onDestroy()
-  }
-
   override fun onRevoke() {
-    // User revoked VPN permission from system settings.
     stopCapture()
     super.onRevoke()
+  }
+
+  override fun onDestroy() {
+    try {
+      proxy?.stop()
+    } catch (_: Exception) {
+    }
+    super.onDestroy()
   }
 }

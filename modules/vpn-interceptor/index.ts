@@ -23,14 +23,24 @@ declare class VpnInterceptorModuleDef extends NativeModule<VpnInterceptorEvents>
    */
   prepare(): Promise<boolean>;
 
-  /** Start the capture session, routing only `allowedPackages` through the tun. */
-  start(allowedPackages: string[]): Promise<void>;
+  /**
+   * Start the capture session. Only `allowedPackages` are routed through the
+   * VPN and pointed at the local MITM proxy; `allowedLabels` (parallel array)
+   * are used to attribute captured traffic to a readable app name.
+   */
+  start(allowedPackages: string[], allowedLabels: string[]): Promise<void>;
 
   /** Tear down the VpnService + local proxy. */
   stop(): Promise<void>;
 
   /** Enumerate installed apps for the Target selector. */
   listInstalledApps(includeSystem: boolean): Promise<InstalledAppInfo[]>;
+
+  /** PEM of the local root CA the user must trust to decrypt HTTPS. */
+  getCaCertificatePem(): Promise<string>;
+
+  /** Launch the system dialog to install/trust the root CA. */
+  installCaCertificate(): Promise<boolean>;
 }
 
 // --- Native / shim resolution -------------------------------------------------
@@ -49,6 +59,12 @@ const createShim = (): VpnInterceptorModuleDef =>
     },
     async listInstalledApps() {
       return [];
+    },
+    async getCaCertificatePem() {
+      return '';
+    },
+    async installCaCertificate() {
+      return false;
     },
     addListener() {
       return { remove() {} };

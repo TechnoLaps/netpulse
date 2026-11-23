@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.net.VpnService
+import android.security.KeyChain
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.exception.Exceptions
 import expo.modules.kotlin.modules.Module
@@ -77,18 +78,39 @@ class VpnInterceptorModule : Module() {
     }
 
     // -- Session control -----------------------------------------------------
-    AsyncFunction("start") { allowedPackages: List<String>, promise: Promise ->
+    AsyncFunction("start") { allowedPackages: List<String>, allowedLabels: List<String>, promise: Promise ->
+      // Register the emitter first so no early status/transaction event is lost.
+      NetPulseVpnService.bindEmitter { name, body -> sendEvent(name, body) }
       val intent = Intent(context, NetPulseVpnService::class.java).apply {
         action = NetPulseVpnService.ACTION_START
         putStringArrayListExtra(
           NetPulseVpnService.EXTRA_ALLOWED_PACKAGES,
           ArrayList(allowedPackages)
         )
+        putStringArrayListExtra(
+          NetPulseVpnService.EXTRA_ALLOWED_LABELS,
+          ArrayList(allowedLabels)
+        )
       }
       context.startService(intent)
-      // The module instance registers itself so the service can emit events.
-      NetPulseVpnService.bindEmitter { name, body -> sendEvent(name, body) }
       promise.resolve(null)
+    }
+
+    // -- Root CA (for HTTPS interception) ------------------------------------
+    AsyncFunction("getCaCertificatePem") {
+      CertificateAuthority(context).caCertificatePem()
+    }
+
+    AsyncFunction("installCaCertificate") { promise: Promise ->
+      val activity = currentActivity
+        ?: return@AsyncFunction promise.reject("E_NO_ACTIVITY", "No foreground activity", null)
+      val der = CertificateAuthority(context).caCertificateDer()
+      val intent = KeyChain.createInstallIntent().apply {
+        putExtra(KeyChain.EXTRA_CERTIFICATE, der)
+        putExtra(KeyChain.EXTRA_NAME, "NetPulse Inspector Root CA")
+      }
+      activity.startActivity(intent)
+      promise.resolve(true)
     }
 
     AsyncFunction("stop") { promise: Promise ->

@@ -26,4 +26,7 @@ android {
 dependencies {
   implementation project(':expo-modules-core')
   implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1"
+  // CA + per-host leaf certificate generation for the TLS MITM proxy.
+  implementation "org.bouncycastle:bcprov-jdk18on:1.78.1"
+  implementation "org.bouncycastle:bcpkix-jdk18on:1.78.1"
 }
