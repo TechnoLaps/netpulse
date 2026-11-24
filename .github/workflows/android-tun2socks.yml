@@ -1,0 +1,76 @@
+name: Build APK with tun2socks engine
+
+# Stage 1 of transparent capture: build the hev-socks5-tunnel native engine
+# (from source, via ndk-build) into the app and prove it compiles/links. This
+# is a separate workflow so it can't break the working proxy-capture APK.
+#
+# The SOCKS5<->MITM bridge and switching the VPN into tunnel mode land in a
+# follow-up; this run only validates the native toolchain + JNI binding.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    name: ndk-build engine + assembleDebug
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch tun2socks engine source (recursive)
+        run: |
+          set -e
+          DEST=modules/vpn-interceptor/android/src/main/jni/hev-socks5-tunnel
+          rm -rf "$DEST"
+          git clone --recursive --depth 1 \
+            https://github.com/heiher/hev-socks5-tunnel "$DEST"
+          echo "Engine source + submodules:" >> "$GITHUB_STEP_SUMMARY"
+          ls "$DEST" >> "$GITHUB_STEP_SUMMARY"
+          ls "$DEST/third-part" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install JS dependencies
+        run: npm install --legacy-peer-deps --no-audit --no-fund
+
+      - name: Expo prebuild (android)
+        run: npx expo prebuild --platform android --no-install
+
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew
+
+      - name: Limit native build to arm64-v8a
+        run: printf '\nreactNativeArchitectures=arm64-v8a\n' >> android/gradle.properties
+
+      - name: Build debug APK with tun2socks engine
+        working-directory: android
+        env:
+          NETPULSE_WITH_TUN2SOCKS: '1'
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Verify engine .so is packaged
+        run: |
+          set -e
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          unzip -l "$APK" | grep -E "libhev-socks5-tunnel.so" \
+            || (echo "::error::engine .so missing from APK" && exit 1)
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: netpulse-tun2socks-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30

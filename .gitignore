@@ -32,3 +32,6 @@ yarn-error.*
 
 # build output
 dist-apk/
+
+# fetched native engine source (cloned in CI)
+modules/vpn-interceptor/android/src/main/jni/

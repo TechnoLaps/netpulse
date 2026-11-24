@@ -15,11 +15,33 @@ applyKotlinExpoModulesCorePlugin()
 useCoreDependencies()
 useDefaultAndroidSdkVersions()
 
+// Build the native tun2socks engine (hev-socks5-tunnel) from source only when
+// explicitly requested, so the default proxy-capture APK pipeline is unaffected.
+// The CI "tun2socks" workflow sets NETPULSE_WITH_TUN2SOCKS=1 after a recursive
+// clone of the engine into src/main/jni/hev-socks5-tunnel.
+def withTun2socks = System.getenv("NETPULSE_WITH_TUN2SOCKS") == "1"
+
 android {
   namespace "expo.modules.vpninterceptor"
 
   defaultConfig {
     minSdkVersion 24
+    if (withTun2socks) {
+      externalNativeBuild {
+        ndkBuild {
+          abiFilters "arm64-v8a"
+        }
+      }
+    }
+  }
+
+  if (withTun2socks) {
+    ndkVersion "27.1.12297006"
+    externalNativeBuild {
+      ndkBuild {
+        path "src/main/jni/hev-socks5-tunnel/Android.mk"
+      }
+    }
   }
 }
 
