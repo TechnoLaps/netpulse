@@ -16,15 +16,18 @@
     },
     "android": {
       "package": "com.netpulse.inspector",
+      "versionCode": 1,
       "edgeToEdgeEnabled": true,
       "permissions": [
         "android.permission.INTERNET",
         "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
         "android.permission.QUERY_ALL_PACKAGES"
       ]
     },
     "plugins": [
       "expo-router",
+      "./plugins/withReleaseSigning",
       [
         "expo-build-properties",
         {
