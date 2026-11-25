@@ -34,6 +34,8 @@ interface TrafficState {
   // Session
   capturing: boolean;
   mockMode: boolean;
+  /** Set by the native bridge once a real capture is running. */
+  captureMode: 'tunnel' | 'proxy' | null;
 
   // Filters
   filters: TrafficFilters;
@@ -79,6 +81,7 @@ export const useTrafficStore = create<TrafficState>((set, get) => ({
 
   capturing: false,
   mockMode: true,
+  captureMode: null,
 
   filters: defaultFilters,
 

@@ -35,8 +35,11 @@ export const useNativeInterceptor = (): { nativeAvailable: boolean } => {
     const statusSub = VpnInterceptor.addListener(
       'onStatus',
       (event: VpnStatusEvent) => {
+        if (event.state === 'running') {
+          useTrafficStore.setState({ captureMode: event.mode ?? 'proxy' });
+        }
         if (event.state === 'stopped' || event.state === 'error') {
-          useTrafficStore.setState({ capturing: false });
+          useTrafficStore.setState({ capturing: false, captureMode: null });
         }
       }
     );

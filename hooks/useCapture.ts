@@ -24,7 +24,7 @@ export const useCapture = (): { capturing: boolean; toggle: () => Promise<void> 
     const state = useTrafficStore.getState();
     if (state.capturing) {
       await VpnInterceptor.stop();
-      useTrafficStore.setState({ capturing: false });
+      useTrafficStore.setState({ capturing: false, captureMode: null });
       return;
     }
 

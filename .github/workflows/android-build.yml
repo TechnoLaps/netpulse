@@ -19,6 +19,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Transparent capture: build the hev-socks5-tunnel engine from source
+      # (ndk-build) into the app. Submodules are required.
+      - name: Fetch tun2socks engine source (recursive)
+        run: |
+          set -e
+          DEST=modules/vpn-interceptor/android/src/main/jni/hev-socks5-tunnel
+          rm -rf "$DEST"
+          git clone --recursive --depth 1 \
+            https://github.com/heiher/hev-socks5-tunnel "$DEST"
+          echo "tun2socks engine commit: $(git -C "$DEST" rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Setup Node 22
         uses: actions/setup-node@v4
         with:
@@ -53,7 +64,14 @@ jobs:
 
       - name: Build debug APK
         working-directory: android
+        env:
+          NETPULSE_WITH_TUN2SOCKS: '1'
         run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Verify engine .so is packaged
+        run: |
+          unzip -l android/app/build/outputs/apk/debug/app-debug.apk | grep -q "libhev-socks5-tunnel.so" \
+            || (echo "::error::tun2socks engine missing from APK" && exit 1)
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4

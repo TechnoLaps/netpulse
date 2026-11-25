@@ -6,42 +6,29 @@ import android.util.Log
 /**
  * TunnelController
  *
- * Integration seam for transparent capture (tun2socks mode).
+ * Seam between the VpnService and the native tun2socks engine.
  *
- * The current capture path (NetPulseVpnService.setHttpProxy) only reaches apps
- * that honor the system HTTP proxy. To also capture proxy-ignoring apps, the VPN
- * must route all TCP through a userspace network stack that converts the tun
- * device's IP packets into SOCKS connections, which a local SOCKS5 server then
- * hands to the MITM logic.
+ *   tun fd  ──►  [tun2socks engine]  ──►  127.0.0.1:socksPort (Socks5Server)
+ *                                                │
+ *                                                ▼
+ *                                        MitmProxyServer.handleTunneled
  *
- * That userspace stack is a native (C) engine — e.g. hev-socks5-tunnel or
- * badvpn-tun2socks — bundled as a prebuilt .so or built from source via the NDK.
- * Sourcing it is a deliberate choice (binary trust, licensing, CI build time),
- * so the engine is NOT wired in yet. An implementation plugs in behind this
- * interface:
- *
- *   tun fd  ──►  [native tun2socks engine]  ──►  127.0.0.1:socksPort (SOCKS5)
- *                                                      │
- *                                                      ▼
- *                                              local SOCKS5 server
- *                                                      │
- *                                                      ▼
- *                                              MitmProxyServer logic
- *
- * Until an engine is provided, [NoopTunnelController] is used and the service
- * stays on the setHttpProxy path.
+ * [HevTunnelController] is the real implementation (hev-socks5-tunnel, built
+ * from source with ndk-build). When the engine library is not bundled, the
+ * service falls back to proxy-only capture and [NoopTunnelController] applies.
  */
 interface TunnelController {
-  /** True when a real native tun2socks engine is bundled and usable. */
+  /** True when a real native tun2socks engine is bundled and loadable. */
   val isEngineAvailable: Boolean
 
   /**
-   * Begin converting packets from [tunFd] into SOCKS5 connections targeting
-   * 127.0.0.1:[socksPort]. The implementation owns the engine lifecycle.
+   * Begin converting packets from [tunFd] into SOCKS5 connections to
+   * 127.0.0.1:[socksPort]. Returns false if the engine failed to start. The
+   * caller keeps ownership of [tunFd] and closes it after [stop].
    */
-  fun start(tunFd: ParcelFileDescriptor, socksPort: Int)
+  fun start(tunFd: ParcelFileDescriptor, socksPort: Int): Boolean
 
-  /** Stop the engine and release the tun fd handling. */
+  /** Stop the engine. */
   fun stop()
 }
 
@@ -50,8 +37,9 @@ object NoopTunnelController : TunnelController {
   private const val TAG = "NetPulseTunnel"
   override val isEngineAvailable: Boolean = false
 
-  override fun start(tunFd: ParcelFileDescriptor, socksPort: Int) {
+  override fun start(tunFd: ParcelFileDescriptor, socksPort: Int): Boolean {
     Log.i(TAG, "tun2socks engine not bundled; using setHttpProxy capture instead.")
+    return false
   }
 
   override fun stop() {}

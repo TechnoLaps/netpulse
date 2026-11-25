@@ -1,16 +1,24 @@
 package expo.modules.vpninterceptor
 
+import android.annotation.TargetApi
 import android.util.Log
 import java.io.BufferedInputStream
+import java.io.ByteArrayInputStream
+import java.io.EOFException
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.io.PushbackInputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLException
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManager
@@ -19,14 +27,21 @@ import javax.net.ssl.X509TrustManager
 /**
  * MitmProxyServer
  *
- * A local HTTP/HTTPS proxy bound to 127.0.0.1. The VpnService points the
- * selected apps' system HTTP proxy here (see NetPulseVpnService). For each
- * connection it parses the HTTP(S) exchange, forwards it upstream, and emits a
- * TrafficEntry-shaped map to JS.
+ * Intercepts HTTP/HTTPS and emits each transaction to JS. Connections reach it
+ * two ways:
+ *
+ *  1. As a classic HTTP proxy on 127.0.0.1 (apps that honor the system proxy;
+ *     plain requests with absolute URIs and CONNECT tunnels).
+ *  2. Via [handleTunneled], called by [Socks5Server] for every TCP flow the
+ *     tun2socks engine reconstructs (transparent capture). The first byte is
+ *     sniffed to tell TLS, HTTP and anything else apart.
  *
  * HTTPS is intercepted with a per-host leaf certificate from [ca]; the client
- * must trust the NetPulse root CA. Only HTTP/1.1 is offered (no ALPN/h2), and
- * upstream TLS is validated leniently to maximize capture coverage.
+ * must trust the NetPulse root CA. Only HTTP/1.1 is offered (no ALPN h2).
+ *
+ * Certificate pinning: when a client rejects our certificate the handshake
+ * fails; that host is then remembered in [bypassHosts] and relayed untouched, so
+ * the app keeps working (its traffic simply is not decrypted).
  */
 class MitmProxyServer(
   private val ca: CertificateAuthority,
@@ -37,6 +52,8 @@ class MitmProxyServer(
   companion object {
     private const val TAG = "NetPulseProxy"
     private const val SOCKET_TIMEOUT_MS = 30_000
+    private const val FIRST_BYTE_TIMEOUT_MS = 3_000
+    private const val MAX_TLS_RECORD = 16_384 + 2_048
   }
 
   private val executor = Executors.newCachedThreadPool()
@@ -45,6 +62,9 @@ class MitmProxyServer(
 
   @Volatile
   private var running = false
+
+  /** Hosts whose TLS handshake with our CA failed (likely pinned): relay only. */
+  private val bypassHosts = ConcurrentHashMap.newKeySet<String>()
 
   // Trust-all upstream context (inspection tool; we are the client here).
   private val upstreamFactory: SSLSocketFactory by lazy {
@@ -108,10 +128,129 @@ class MitmProxyServer(
   }
 
   // ---------------------------------------------------------------------------
-  // Plain HTTP (request target is an absolute URI via the proxy)
+  // Transparent (tun2socks) connections
   // ---------------------------------------------------------------------------
 
-  private fun handlePlainHttp(client: Socket, input: InputStream, first: HttpIo.Message) {
+  /**
+   * Handles one TCP flow delivered by [Socks5Server] after its handshake.
+   * [host] is the SOCKS destination: a domain name (mapdns) or an IP literal.
+   * The caller closes [client] when this returns.
+   */
+  fun handleTunneled(client: Socket, host: String, port: Int) {
+    val raw = client.getInputStream()
+
+    // Classify by the first client byte. Server-first protocols never send one,
+    // so a short timeout falls through to a plain relay.
+    client.soTimeout = FIRST_BYTE_TIMEOUT_MS
+    val first = try {
+      raw.read()
+    } catch (_: SocketTimeoutException) {
+      NO_BYTE
+    }
+    client.soTimeout = SOCKET_TIMEOUT_MS
+    if (first == -1) return
+
+    val firstBytes = if (first >= 0) byteArrayOf(first.toByte()) else null
+    if (first == NO_BYTE || bypassHosts.contains(host)) {
+      relay(client, raw, host, port, firstBytes)
+      return
+    }
+
+    when {
+      first == 0x16 -> {
+        val record = readTlsRecord(raw, first)
+        val certHost = TlsSni.parse(record) ?: host
+        val tls = acceptTls(client, host, certHost, port, record) ?: return
+        serveTls(tls, host, certHost, port)
+      }
+      isHttpStart(first) -> {
+        val pushback = PushbackInputStream(raw, 1)
+        pushback.unread(first)
+        val input = BufferedInputStream(pushback, 16_384)
+        val message = HttpIo.readMessage(input, isRequest = true) ?: return
+        handlePlainHttp(client, input, message, host to port)
+      }
+      else -> relay(client, raw, host, port, firstBytes)
+    }
+  }
+
+  private fun isHttpStart(b: Int): Boolean =
+    b == 'G'.code || b == 'P'.code || b == 'H'.code || b == 'D'.code ||
+      b == 'O'.code || b == 'T'.code || b == 'C'.code
+
+  private fun readTlsRecord(input: InputStream, firstByte: Int): ByteArray {
+    val header = ByteArray(5)
+    header[0] = firstByte.toByte()
+    readFully(input, header, 1, 4)
+    val length = ((header[3].toInt() and 0xff) shl 8) or (header[4].toInt() and 0xff)
+    if (length <= 0 || length > MAX_TLS_RECORD) throw IOException("bad TLS record length $length")
+    val record = ByteArray(5 + length)
+    System.arraycopy(header, 0, record, 0, 5)
+    readFully(input, record, 5, length)
+    return record
+  }
+
+  private fun readFully(input: InputStream, buffer: ByteArray, offset: Int, length: Int) {
+    var read = 0
+    while (read < length) {
+      val n = input.read(buffer, offset + read, length - read)
+      if (n < 0) throw EOFException()
+      read += n
+    }
+  }
+
+  /** Copies bytes both ways between the client and an upstream host, untouched. */
+  private fun relay(client: Socket, clientIn: InputStream, host: String, port: Int, firstBytes: ByteArray?) {
+    val upstream = openUpstream(host, port, tls = false)
+    upstream.soTimeout = 0
+    client.soTimeout = 0
+    try {
+      val upstreamOut = upstream.getOutputStream()
+      if (firstBytes != null) {
+        upstreamOut.write(firstBytes)
+        upstreamOut.flush()
+      }
+      executor.submit {
+        pump(clientIn, upstreamOut)
+        try {
+          upstream.shutdownOutput()
+        } catch (_: Exception) {
+        }
+      }
+      pump(upstream.getInputStream(), client.getOutputStream())
+    } finally {
+      upstream.closeQuietly()
+    }
+  }
+
+  private fun pump(input: InputStream, output: OutputStream) {
+    val buffer = ByteArray(16_384)
+    try {
+      while (true) {
+        val n = input.read(buffer)
+        if (n < 0) break
+        output.write(buffer, 0, n)
+        output.flush()
+      }
+    } catch (_: Exception) {
+      // Peer closed or the session was torn down.
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Plain HTTP
+  // ---------------------------------------------------------------------------
+
+  /**
+   * [fixedDest] is set for transparent connections, where the request target is
+   * origin-form and the real destination comes from the SOCKS request.
+   */
+  private fun handlePlainHttp(
+    client: Socket,
+    input: InputStream,
+    first: HttpIo.Message,
+    fixedDest: Pair<String, Int>? = null,
+  ) {
     var request: HttpIo.Message = first
     val out = client.getOutputStream()
     var upstream: Socket? = null
@@ -122,8 +261,8 @@ class MitmProxyServer(
     try {
       while (true) {
         val (method, target, version) = parseRequestLine(request.startLine)
-        val url = absoluteUrl(target, request.header("Host"), "http")
-        val hostPort = hostPortOf(url, 80)
+        val url = absoluteUrl(target, request.header("Host") ?: fixedDest?.first, "http")
+        val hostPort = fixedDest ?: hostPortOf(url, 80)
         val host = hostPort.first
         val port = hostPort.second
 
@@ -143,12 +282,15 @@ class MitmProxyServer(
 
         val response = HttpIo.readMessage(upIn!!, isRequest = false)
         if (response == null) {
-          upstream.closeQuietly(); upstream = null
+          upstream.closeQuietly()
+          upstream = null
           break
         }
         HttpIo.writeMessage(out, response, asForwardRequest = false)
-        emit(scheme = "http", host = host, port = port, version = version,
-          request = request, response = response, startedAt = started)
+        emit(
+          scheme = "http", host = host, port = port, version = version,
+          request = request, response = response, startedAt = started
+        )
 
         val keepClient = HttpIo.isKeepAlive(request, version) &&
           HttpIo.isKeepAlive(response, response.startLine.substringBefore(' '))
@@ -161,7 +303,7 @@ class MitmProxyServer(
   }
 
   // ---------------------------------------------------------------------------
-  // HTTPS via CONNECT (TLS interception)
+  // HTTPS via CONNECT (system-proxy path)
   // ---------------------------------------------------------------------------
 
   private fun handleConnect(client: Socket, connect: HttpIo.Message) {
@@ -175,17 +317,54 @@ class MitmProxyServer(
       flush()
     }
 
-    val serverCtx = ca.serverSslContext(host)
-    val tlsClient = (serverCtx.socketFactory.createSocket(
-      client, host, port, true
-    ) as SSLSocket).apply {
-      useClientMode = false
-      // Offer only HTTP/1.1 (no ALPN h2) so our parser applies.
+    if (bypassHosts.contains(host)) {
+      relay(client, client.getInputStream(), host, port, null)
+      return
     }
-    tlsClient.startHandshake()
+    val tls = acceptTls(client, host, host, port, null) ?: return
+    serveTls(tls, host, host, port)
+  }
 
-    val clientIn = BufferedInputStream(tlsClient.inputStream)
-    val clientOut = tlsClient.outputStream
+  /**
+   * Performs the server side of the TLS handshake with the client using a leaf
+   * certificate for [certHost]. [consumed] holds bytes already read from the
+   * socket (the ClientHello when sniffed in tunnel mode). Returns null when the
+   * client rejects our certificate, after marking the host for bypass.
+   */
+  @TargetApi(29)
+  private fun acceptTls(
+    client: Socket,
+    bypassKey: String,
+    certHost: String,
+    port: Int,
+    consumed: ByteArray?,
+  ): SSLSocket? {
+    val factory = ca.serverSslContext(certHost).socketFactory
+    val layered: Socket = if (consumed != null) {
+      factory.createSocket(client, ByteArrayInputStream(consumed), true)
+    } else {
+      factory.createSocket(client, certHost, port, true)
+    }
+    val tls = layered as SSLSocket
+    tls.useClientMode = false
+    return try {
+      tls.startHandshake()
+      tls
+    } catch (e: SSLException) {
+      Log.i(TAG, "TLS handshake rejected for $certHost (${e.message}); relaying this host untouched from now on")
+      bypassHosts.add(bypassKey)
+      bypassHosts.add(certHost)
+      try {
+        tls.close()
+      } catch (_: Exception) {
+      }
+      null
+    }
+  }
+
+  private fun serveTls(tls: SSLSocket, connectHost: String, sniHost: String, port: Int) {
+    val clientIn = BufferedInputStream(tls.inputStream)
+    val clientOut = tls.outputStream
 
     var upstream: SSLSocket? = null
     var upIn: InputStream? = null
@@ -197,7 +376,7 @@ class MitmProxyServer(
         val (method, target, version) = parseRequestLine(request.startLine)
 
         if (upstream == null) {
-          upstream = openUpstreamTls(host, port)
+          upstream = openUpstreamTls(connectHost, sniHost, port)
           upIn = BufferedInputStream(upstream.inputStream)
           upOut = upstream.outputStream
         }
@@ -210,19 +389,21 @@ class MitmProxyServer(
         if (response == null) break
         HttpIo.writeMessage(clientOut, response, asForwardRequest = false)
 
-        emit(scheme = "https", host = host, port = port, version = version,
-          request = request, response = response, startedAt = started)
+        emit(
+          scheme = "https", host = sniHost, port = port, version = version,
+          request = request, response = response, startedAt = started
+        )
 
         val keepAlive = HttpIo.isKeepAlive(request, version) &&
           HttpIo.isKeepAlive(response, response.startLine.substringBefore(' '))
         if (!keepAlive) break
       }
     } catch (e: Exception) {
-      Log.d(TAG, "tls tunnel error for $host: ${e.message}")
+      Log.d(TAG, "tls tunnel error for $sniHost: ${e.message}")
     } finally {
       upstream?.closeQuietly()
       try {
-        tlsClient.close()
+        tls.close()
       } catch (_: Exception) {
       }
     }
@@ -240,12 +421,13 @@ class MitmProxyServer(
     return raw
   }
 
-  private fun openUpstreamTls(host: String, port: Int): SSLSocket {
+  /** Connects to [connectHost] but presents [sniHost] as the TLS server name. */
+  private fun openUpstreamTls(connectHost: String, sniHost: String, port: Int): SSLSocket {
     val raw = Socket()
     protect(raw)
-    raw.connect(InetSocketAddress(host, port), SOCKET_TIMEOUT_MS)
+    raw.connect(InetSocketAddress(connectHost, port), SOCKET_TIMEOUT_MS)
     raw.soTimeout = SOCKET_TIMEOUT_MS
-    val tls = upstreamFactory.createSocket(raw, host, port, true) as SSLSocket
+    val tls = upstreamFactory.createSocket(raw, sniHost, port, true) as SSLSocket
     tls.useClientMode = true
     tls.startHandshake()
     return tls
@@ -265,7 +447,7 @@ class MitmProxyServer(
     startedAt: Long,
   ) {
     val (method, target, _) = parseRequestLine(request.startLine)
-    val fullUrl = absoluteUrl(target, request.header("Host"), scheme)
+    val fullUrl = absoluteUrl(target, request.header("Host") ?: host, scheme)
     val path = pathOf(fullUrl)
     val (sourceApp, sourceLabel) = attribution()
     val statusCode = HttpIo.statusCode(response.startLine)
@@ -403,3 +585,6 @@ class MitmProxyServer(
     override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
   }
 }
+
+/** Sentinel for "the client sent nothing before the peek timeout". */
+private const val NO_BYTE = -2

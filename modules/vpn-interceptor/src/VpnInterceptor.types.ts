@@ -6,9 +6,15 @@ export interface NativeTransactionEvent {
   payload: TrafficEntry;
 }
 
+/** How traffic is being captured: transparent tun2socks, or system-proxy only. */
+export type CaptureMode = 'tunnel' | 'proxy';
+
 export interface VpnStatusEvent {
   state: 'idle' | 'preparing' | 'running' | 'stopped' | 'error';
   message?: string;
+  /** Present when state === 'running'. */
+  mode?: CaptureMode;
+  proxyPort?: number;
 }
 
 export type VpnInterceptorEvents = {

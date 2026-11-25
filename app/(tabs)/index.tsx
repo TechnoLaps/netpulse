@@ -39,6 +39,7 @@ export default function LiveFeedScreen() {
   const entries = useTrafficStore((s) => s.entries);
   const filters = useTrafficStore((s) => s.filters);
   const mockMode = useTrafficStore((s) => s.mockMode);
+  const captureMode = useTrafficStore((s) => s.captureMode);
 
   const { capturing, toggle: toggleCapture } = useCapture();
   const emitMockNow = useTrafficStore((s) => s.emitMockNow);
@@ -97,6 +98,16 @@ export default function LiveFeedScreen() {
             SIMULATION MODE — traffic is generated on-device. Tap{' '}
             <Zap size={11} color={colors.put} /> for a single call, or Start for a live
             stream.
+          </Text>
+        </View>
+      )}
+
+      {!mockMode && capturing && captureMode && (
+        <View style={styles.mockBanner}>
+          <Text style={styles.mockText}>
+            {captureMode === 'tunnel'
+              ? 'TRANSPARENT CAPTURE — all traffic from the selected apps is routed through the local interceptor. Hosts that reject the NetPulse CA (pinned apps) are passed through untouched.'
+              : 'PROXY CAPTURE — only apps that honor the system proxy are captured.'}
           </Text>
         </View>
       )}
