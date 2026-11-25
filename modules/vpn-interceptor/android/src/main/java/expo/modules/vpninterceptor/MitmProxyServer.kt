@@ -1,9 +1,7 @@
 package expo.modules.vpninterceptor
 
-import android.annotation.TargetApi
 import android.util.Log
 import java.io.BufferedInputStream
-import java.io.ByteArrayInputStream
 import java.io.EOFException
 import java.io.IOException
 import java.io.InputStream
@@ -331,7 +329,6 @@ class MitmProxyServer(
    * socket (the ClientHello when sniffed in tunnel mode). Returns null when the
    * client rejects our certificate, after marking the host for bypass.
    */
-  @TargetApi(29)
   private fun acceptTls(
     client: Socket,
     bypassKey: String,
@@ -340,12 +337,11 @@ class MitmProxyServer(
     consumed: ByteArray?,
   ): SSLSocket? {
     val factory = ca.serverSslContext(certHost).socketFactory
-    val layered: Socket = if (consumed != null) {
-      factory.createSocket(client, ByteArrayInputStream(consumed), true)
-    } else {
-      factory.createSocket(client, certHost, port, true)
-    }
-    val tls = layered as SSLSocket
+    // Android has no public API to feed already-read bytes into a TLS server
+    // socket, so when the ClientHello was sniffed we run TLS over a loopback pipe
+    // that replays those bytes first.
+    val source: Socket = if (consumed != null) pipeWithPrefix(client, consumed) else client
+    val tls = factory.createSocket(source, certHost, port, true) as SSLSocket
     tls.useClientMode = false
     return try {
       tls.startHandshake()
@@ -359,6 +355,40 @@ class MitmProxyServer(
       } catch (_: Exception) {
       }
       null
+    }
+  }
+
+  /**
+   * Returns a loopback socket whose input starts with [prefix] and then carries
+   * everything [client] sends; bytes written to it go back to [client]. The pumps
+   * end when either side closes.
+   */
+  private fun pipeWithPrefix(client: Socket, prefix: ByteArray): Socket {
+    val loopback = InetAddress.getByName("127.0.0.1")
+    ServerSocket(0, 1, loopback).use { listener ->
+      val near = Socket(loopback, listener.localPort)
+      val far = listener.accept()
+      executor.submit {
+        try {
+          val out = near.getOutputStream()
+          out.write(prefix)
+          out.flush()
+        } catch (_: Exception) {
+        }
+        pump(client.getInputStream(), near.getOutputStream())
+        try {
+          near.shutdownOutput()
+        } catch (_: Exception) {
+        }
+      }
+      executor.submit {
+        pump(near.getInputStream(), client.getOutputStream())
+        try {
+          near.close()
+        } catch (_: Exception) {
+        }
+      }
+      return far
     }
   }
 
