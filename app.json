@@ -7,7 +7,10 @@
     "scheme": "netpulse",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
+    "icon": "./assets/icon.png",
     "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
       "backgroundColor": "#0b0f17"
     },
     "ios": {
@@ -17,6 +20,10 @@
     "android": {
       "package": "com.netpulse.inspector",
       "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0b0f17"
+      },
       "edgeToEdgeEnabled": true,
       "permissions": [
         "android.permission.INTERNET",

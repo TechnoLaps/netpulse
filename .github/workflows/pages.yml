@@ -1,0 +1,44 @@
+name: Deploy landing page
+
+# Publishes docs/ to GitHub Pages. Requires Pages to be enabled for the repo
+# (Settings → Pages → Source: GitHub Actions). For a private repo, Pages needs
+# a paid plan; for a public repo it is free. configure-pages attempts to enable
+# it automatically when the token has permission.
+
+on:
+  # Manual-only until the repo is public (Pages on a private repo needs a paid
+  # plan). Once public, add the push trigger to auto-deploy on docs changes.
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Upload docs artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

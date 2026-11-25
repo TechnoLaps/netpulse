@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>NetPulse Inspector — on-device API traffic inspector</title>
+<meta name="description" content="On-device HTTP(S) traffic logger, token/JWT inspector and cURL generator for Android. Open source." />
+<link rel="icon" href="./icon.png" />
+<style>
+  :root {
+    --bg: #0b0f17; --surface: #111726; --surface-alt: #0e1420;
+    --border: #1f2937; --text: #e5e9f0; --muted: #94a3b8; --faint: #64748b;
+    --emerald: #34d399; --indigo: #818cf8; --amber: #fbbf24; --danger: #f87171;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    line-height: 1.6;
+  }
+  a { color: var(--indigo); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 20px; }
+  .nav {
+    display: flex; align-items: center; gap: 12px;
+    padding: 18px 20px; max-width: 1040px; margin: 0 auto;
+  }
+  .nav img { width: 34px; height: 34px; border-radius: 8px; }
+  .nav .name { font-weight: 800; letter-spacing: .3px; }
+  .nav .spacer { flex: 1; }
+  .nav a { color: var(--muted); font-size: 14px; font-weight: 600; }
+
+  .hero { text-align: center; padding: 56px 20px 40px; }
+  .hero img { width: 112px; height: 112px; border-radius: 26px;
+    box-shadow: 0 0 60px rgba(52,211,153,.25); }
+  .hero h1 { font-size: clamp(32px, 6vw, 52px); margin: 22px 0 10px; letter-spacing: -1px; }
+  .hero .tag { color: var(--muted); font-size: clamp(16px, 2.6vw, 20px); max-width: 620px; margin: 0 auto; }
+  .badges { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin: 18px 0 26px; }
+  .badge { font-size: 12px; color: var(--muted); border: 1px solid var(--border);
+    border-radius: 999px; padding: 5px 12px; font-family: var(--mono); }
+  .cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .btn { display: inline-flex; align-items: center; gap: 9px; font-weight: 700;
+    font-size: 15px; padding: 13px 22px; border-radius: 12px; border: 1px solid transparent; }
+  .btn-primary { background: var(--emerald); color: #06281d; }
+  .btn-primary:hover { text-decoration: none; filter: brightness(1.05); }
+  .btn-ghost { border-color: var(--border); color: var(--text); background: var(--surface); }
+  .btn-ghost:hover { text-decoration: none; background: #1a2234; }
+  .cta .note { color: var(--faint); font-size: 12px; margin-top: 10px; flex-basis: 100%; }
+
+  section { padding: 44px 0; border-top: 1px solid var(--border); }
+  h2 { font-size: 26px; letter-spacing: -.5px; margin: 0 0 8px; }
+  .lead { color: var(--muted); margin: 0 0 26px; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 20px; }
+  .card h3 { margin: 0 0 6px; font-size: 16px; }
+  .card p { margin: 0; color: var(--muted); font-size: 14px; }
+  .card .ic { font-size: 22px; }
+
+  ol.steps { counter-reset: s; list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
+  ol.steps li { background: var(--surface-alt); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px 16px 16px 56px; position: relative; color: var(--muted); }
+  ol.steps li::before { counter-increment: s; content: counter(s); position: absolute; left: 16px; top: 14px;
+    width: 26px; height: 26px; border-radius: 50%; background: #3730a3; color: var(--indigo);
+    font-weight: 800; display: grid; place-items: center; font-size: 13px; }
+  ol.steps b { color: var(--text); }
+
+  .note-box { background: var(--surface-alt); border: 1px solid #fbbf2455; border-radius: 12px;
+    padding: 16px; color: var(--amber); font-size: 14px; }
+  code { font-family: var(--mono); background: var(--surface-alt); padding: 2px 6px; border-radius: 5px;
+    color: var(--emerald); font-size: .92em; }
+  pre { background: var(--surface-alt); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px; overflow-x: auto; }
+  pre code { background: none; padding: 0; color: var(--text); }
+
+  footer { border-top: 1px solid var(--border); padding: 28px 20px; color: var(--faint); font-size: 13px;
+    text-align: center; }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+  <nav class="nav">
+    <img src="./icon.png" alt="NetPulse" />
+    <span class="name">NetPulse Inspector</span>
+    <span class="spacer"></span>
+    <a href="#features">Features</a>
+    <a href="#install">Install</a>
+    <a href="https://github.com/EngAbdalrhman/netpulse">GitHub</a>
+  </nav>
+
+  <header class="hero">
+    <img src="./icon-512.png" alt="NetPulse Inspector icon" />
+    <h1>See what your apps say to the internet.</h1>
+    <p class="tag">An on-device HTTP(S) traffic logger, token &amp; JWT inspector, and cURL / HAR / Postman
+      generator for Android — all running locally on your phone.</p>
+    <div class="badges">
+      <span class="badge">Expo · React Native</span>
+      <span class="badge">Android 10+</span>
+      <span class="badge">arm64-v8a</span>
+      <span class="badge">MIT</span>
+    </div>
+    <div class="cta">
+      <a class="btn btn-primary" href="https://github.com/EngAbdalrhman/netpulse/releases/latest/download/app-release.apk">⬇ Download APK</a>
+      <a class="btn btn-ghost" href="https://github.com/EngAbdalrhman/netpulse">★ View source</a>
+      <span class="note">Sideload build — enable “install unknown apps”. Not on the Play Store.</span>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <section id="features">
+      <h2>What it does</h2>
+      <p class="lead">A developer-grade traffic inspector that never leaves the device.</p>
+      <div class="grid">
+        <div class="card"><div class="ic">📡</div><h3>Live traffic feed</h3><p>Capture HTTP/HTTPS calls from the apps you select, with method, status, host, timing and size — filter by method, status, app or “has token”.</p></div>
+        <div class="card"><div class="ic">🔑</div><h3>Token &amp; JWT inspector</h3><p>Auto-extracts Bearer / API-key / Cookie credentials and decodes JWT header &amp; payload with expiry — one tap to copy.</p></div>
+        <div class="card"><div class="ic">🧰</div><h3>cURL generator</h3><p>Turn any captured request into a ready-to-run, shell-safe cURL command. Copy or share.</p></div>
+        <div class="card"><div class="ic">📦</div><h3>Export</h3><p>Export the whole session as HAR 1.2, a Postman v2.1 collection, or a runnable cURL bundle.</p></div>
+        <div class="card"><div class="ic">🔒</div><h3>On-device MITM</h3><p>A local proxy + VpnService intercept your selected apps’ traffic. Install the local CA to decrypt HTTPS. Nothing is sent to a server.</p></div>
+        <div class="card"><div class="ic">🧪</div><h3>Simulation mode</h3><p>Realistic mock traffic lets you try the whole UI before touching a real app.</p></div>
+      </div>
+    </section>
+
+    <section id="install">
+      <h2>Install</h2>
+      <p class="lead">Two minutes, no computer required.</p>
+      <ol class="steps">
+        <li><b>Download the APK</b> from the button above (or the Releases page) directly on your phone.</li>
+        <li><b>Allow install</b> from your browser/file manager when Android prompts about unknown sources.</li>
+        <li><b>Open NetPulse → Cert tab → Install certificate</b> to trust the local CA (needed to decrypt HTTPS).</li>
+        <li><b>Pick a target app</b> on the Targets tab, then hit <b>Start Capture</b> and approve the VPN prompt.</li>
+      </ol>
+      <p class="muted" style="margin-top:16px">Prefer to build it yourself? Clone the repo and run the GitHub Actions workflow, or <code>npx expo run:android</code>.</p>
+    </section>
+
+    <section>
+      <h2>Scope &amp; ethics</h2>
+      <div class="note-box">
+        NetPulse inspects traffic on <b>your own device</b> for development and authorized security testing.
+        Decrypting HTTPS requires installing a local CA you control; apps that use certificate pinning will not
+        be decryptable. Only inspect apps and devices you are authorized to test.
+      </div>
+    </section>
+
+    <section>
+      <h2>Build from source</h2>
+      <pre><code>git clone https://github.com/EngAbdalrhman/netpulse
+cd netpulse
+npm install --legacy-peer-deps
+npx expo run:android   # or trigger the GitHub Actions build</code></pre>
+    </section>
+  </div>
+
+  <footer>
+    NetPulse Inspector · MIT License ·
+    <a href="https://github.com/EngAbdalrhman/netpulse">github.com/EngAbdalrhman/netpulse</a><br />
+    Built with Expo &amp; React Native. For authorized, on-device testing only.
+  </footer>
+</body>
+</html>
