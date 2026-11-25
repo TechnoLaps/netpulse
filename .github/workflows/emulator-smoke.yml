@@ -1,0 +1,92 @@
+name: Emulator smoke test
+
+# Installs an APK on an Android emulator, launches it, and uploads the logcat,
+# crash buffer and a screenshot, so startup crashes can be diagnosed without a
+# physical device. The APKs are arm64-only; the emulator runs them through the
+# ARM translation layer of an API 30+ x86_64 image.
+#
+# Inputs (pick one source):
+#   run_id   - download the debug/release artifact from this workflow run
+#   apk_url  - otherwise download from this URL (default: latest GitHub Release)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Workflow run id to take the APK artifact from (optional)'
+        required: false
+        default: ''
+      artifact:
+        description: 'Artifact name when run_id is set'
+        required: false
+        default: 'netpulse-inspector-debug-apk'
+      apk_url:
+        description: 'APK URL when run_id is empty'
+        required: false
+        default: 'https://github.com/TechnoLaps/netpulse/releases/latest/download/app-release.apk'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Get APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+          ARTIFACT: ${{ inputs.artifact }}
+          APK_URL: ${{ inputs.apk_url }}
+        run: |
+          set -e
+          mkdir -p apk
+          if [ -n "$RUN_ID" ]; then
+            gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" -n "$ARTIFACT" -D apk
+          else
+            curl -fsSL -o apk/app.apk "$APK_URL"
+          fi
+          APK=$(ls apk/*.apk | head -n 1)
+          echo "APK=$APK" >> "$GITHUB_ENV"
+          ls -la apk
+
+      - name: Run on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          script: |
+            adb logcat -c
+            adb shell getprop ro.product.cpu.abilist
+            adb install -r "$APK" || adb install -r --abi arm64-v8a "$APK"
+            adb shell monkey -p com.netpulse.inspector -c android.intent.category.LAUNCHER 1
+            sleep 25
+            adb shell pidof com.netpulse.inspector > pid.txt || true
+            adb logcat -d -b crash > crash.txt || true
+            adb logcat -d > logcat.txt || true
+            adb exec-out screencap -p > screen.png || true
+            echo "pid: $(cat pid.txt)"
+            echo "--- crash buffer ---"
+            head -n 80 crash.txt
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulator-diagnostics
+          path: |
+            crash.txt
+            logcat.txt
+            screen.png
+            pid.txt
+          if-no-files-found: warn
