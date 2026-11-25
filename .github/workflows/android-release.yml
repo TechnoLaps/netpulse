@@ -12,7 +12,12 @@ name: Build Android Release APK
 # Trigger: manually (workflow_dispatch) or by pushing a tag like v1.0.0.
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      abis:
+        description: 'Native ABIs to build (e.g. "arm64-v8a" or "arm64-v8a,x86_64" for emulator testing)'
+        required: false
+        default: 'arm64-v8a'
   push:
     tags: ['v*']
 
@@ -59,8 +64,10 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
-      - name: Limit native build to arm64-v8a
-        run: printf '\nreactNativeArchitectures=arm64-v8a\n' >> android/gradle.properties
+      - name: Limit native build ABIs
+        env:
+          ABIS: ${{ inputs.abis || 'arm64-v8a' }}
+        run: printf '\nreactNativeArchitectures=%s\n' "$ABIS" >> android/gradle.properties
 
       - name: Prepare signing key
         env:
