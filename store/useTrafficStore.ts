@@ -172,8 +172,16 @@ const statusBucketMatches = (status: FilterStatus, code?: number): boolean => {
   }
 };
 
-export const selectFilteredEntries = (state: TrafficState): TrafficEntry[] => {
-  const { entries, filters } = state;
+/**
+ * Pure filter. Do NOT pass a function that calls this to the store hook as a
+ * selector: it returns a new array every time, which zustand v5 treats as a
+ * state change on every render (infinite update loop). Select `entries` and
+ * `filters` separately and call this inside useMemo instead.
+ */
+export const filterEntries = (
+  entries: TrafficEntry[],
+  filters: TrafficFilters
+): TrafficEntry[] => {
   const q = filters.search.trim().toLowerCase();
   return entries.filter((e) => {
     if (filters.method !== 'ALL' && e.request.method !== filters.method) return false;

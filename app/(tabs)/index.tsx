@@ -19,10 +19,7 @@ import {
   Zap,
 } from 'lucide-react-native';
 import { colors, radius, spacing } from '../../theme/colors';
-import {
-  selectFilteredEntries,
-  useTrafficStore,
-} from '../../store/useTrafficStore';
+import { filterEntries, useTrafficStore } from '../../store/useTrafficStore';
 import { MethodBadge, Pill, StatusBadge } from '../../components/Badges';
 import { useCapture } from '../../hooks/useCapture';
 import { formatBytes, formatDuration, formatTime } from '../../utils/format';
@@ -49,7 +46,9 @@ export default function LiveFeedScreen() {
   const setStatusFilter = useTrafficStore((s) => s.setStatusFilter);
   const toggleAuthFilter = useTrafficStore((s) => s.toggleAuthFilter);
 
-  const filtered = useTrafficStore(selectFilteredEntries);
+  // Select stable state and derive the list here: a selector that returns a new
+  // array each call loops forever under zustand v5.
+  const filtered = useMemo(() => filterEntries(entries, filters), [entries, filters]);
 
   const [showFilters, setShowFilters] = useState(true);
 
